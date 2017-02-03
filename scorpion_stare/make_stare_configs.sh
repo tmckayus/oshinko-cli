@@ -11,4 +11,5 @@ oc create configmap driverconfig --from-file=driverconfig
 oc create configmap clusterconfig --from-literal=metrics.enable=true \
                                   --from-literal=scorpionstare.enable=true \
                                   --from-literal=sparkmasterconfig=masterconfig \
-                                  --from-literal=sparkworkerconfig=workerconfig
+                                  --from-literal=sparkworkerconfig=workerconfig \
+                                  --from-literal=sparkimage=docker.io/manyangled/var-spark-worker:latest
