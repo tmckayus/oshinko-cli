@@ -30,5 +30,5 @@ func (s *OshinkoRestTestSuite) TestServerInfo(c *check.C) {
 	resp, _ = s.cli.Server.GetServerInfo(nil)
 	observedImage = resp.Payload.Application.DefaultClusterImage
 	c.Assert(*observedImage, check.Equals, expectedImage)
-	fmt.Println("ending server test " + observedImage)
+	fmt.Println("ending server test " + *observedImage)
 }
