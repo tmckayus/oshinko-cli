@@ -12,6 +12,7 @@ import (
 func (s *OshinkoRestTestSuite) TestServerInfo(c *check.C) {
 	fmt.Println("starting server test")
 	resp, _ := s.cli.Server.GetServerInfo(nil)
+	fmt.Println("after request")
 
 	expectedName := version.GetAppName()
 	expectedVersion := version.GetVersion()
@@ -27,7 +28,9 @@ func (s *OshinkoRestTestSuite) TestServerInfo(c *check.C) {
 
 	os.Setenv("OSHINKO_CLUSTER_IMAGE", "bobby")
 	expectedImage = "bobby"
+	fmt.Println("second request")
 	resp, _ = s.cli.Server.GetServerInfo(nil)
+	fmt.Println("after second request")
 	observedImage = resp.Payload.Application.DefaultClusterImage
 	c.Assert(*observedImage, check.Equals, expectedImage)
 	fmt.Println("ending server test " + *observedImage)
