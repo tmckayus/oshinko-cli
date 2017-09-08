@@ -21,6 +21,7 @@ import (
 	"github.com/radanalyticsio/oshinko-cli/rest/client"
 	"github.com/radanalyticsio/oshinko-cli/rest/restapi"
 	"github.com/radanalyticsio/oshinko-cli/rest/restapi/operations"
+	"os"
 )
 
 // Test connects gocheck to the "go test" runner
@@ -60,6 +61,7 @@ func (s *OshinkoRestTestSuite) SetUpSuite(c *check.C) {
 	s.server = server
 
 	server.Listen()
+	os.Setenv("OSHINKO_CLUSTER_IMAGE", "override-value")
 	go server.Serve()
 }
 
