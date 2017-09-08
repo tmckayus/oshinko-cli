@@ -21,7 +21,6 @@ import (
 	"github.com/radanalyticsio/oshinko-cli/rest/client"
 	"github.com/radanalyticsio/oshinko-cli/rest/restapi"
 	"github.com/radanalyticsio/oshinko-cli/rest/restapi/operations"
-	"os"
 )
 
 // Test connects gocheck to the "go test" runner
