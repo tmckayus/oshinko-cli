@@ -61,7 +61,6 @@ func (s *OshinkoRestTestSuite) SetUpSuite(c *check.C) {
 	s.server = server
 
 	server.Listen()
-	os.Setenv("OSHINKO_CLUSTER_IMAGE", "override-value")
 	go server.Serve()
 }
 
