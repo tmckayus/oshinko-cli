@@ -6,20 +6,22 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	oclient "github.com/openshift/origin/pkg/client"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	ocon "github.com/radanalyticsio/oshinko-cli/core/clusters/containers"
 	odc "github.com/radanalyticsio/oshinko-cli/core/clusters/deploymentconfigs"
 	opt "github.com/radanalyticsio/oshinko-cli/core/clusters/podtemplates"
 	"github.com/radanalyticsio/oshinko-cli/core/clusters/probes"
 	ort "github.com/radanalyticsio/oshinko-cli/core/clusters/routes"
 	osv "github.com/radanalyticsio/oshinko-cli/core/clusters/services"
-	kapi "k8s.io/kubernetes/pkg/api"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/selection"
-	"k8s.io/kubernetes/pkg/util/sets"
+	kapi "k8s.io/kubernetes/pkg/api/v1"
+	clv1 "k8s.io/client-go/pkg/api/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/labels"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	routeclient "github.com/openshift/origin/pkg/route/generated/clientset"
+	dclient "github.com/openshift/origin/pkg/apps/generated/clientset"
+	ov1 "github.com/openshift/origin/pkg/apps/apis/apps/v1"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 )
 
 
@@ -82,6 +84,25 @@ type SparkCluster struct {
 	Pods         []SparkPod
 }
 
+type ClientKeeper struct {
+	config *rest.Config
+	kubecl *kubernetes.Clientset
+	routecl *routeclient.Clientset
+	dccl *dclient.Clientset
+}
+
+func getClientKeeper(restconfig *rest.Config) ClientKeeper {
+	k := ClientKeeper{config: restconfig}
+	k.kubecl, _ = kubernetes.NewForConfig(k.config)
+	k.routecl, _ = routeclient.NewForConfig(k.config)
+	k.dccl, _ = dclient.NewForConfig(k.config)
+	return k
+}
+
+func getKubeClient(k ClientKeeper) *kubernetes.Clientset {return k.kubecl}
+func getRouteClient(k ClientKeeper) *routeclient.Clientset {return k.routecl}
+func getDcClient(k ClientKeeper) *dclient.Clientset {return k.dccl}
+
 func generalErr(err error, msg string, code int) ClusterError {
 	if err != nil {
 		if msg == "" {
@@ -93,29 +114,26 @@ func generalErr(err error, msg string, code int) ClusterError {
 	return NewClusterError(msg, code)
 }
 
-func makeSelector(otype string, clustername string) kapi.ListOptions {
+func makeSelector(otype string, clustername string) metav1.ListOptions {
 	// Build a selector list based on type and/or cluster name
-	var ot *labels.Requirement
-	var cname *labels.Requirement
-	ls := labels.NewSelector()
+	var selector string
 	if otype == "" {
-		ot, _ = labels.NewRequirement(typeLabel, selection.Exists, sets.String{})
+		selector = typeLabel + ","
 	} else {
-		ot, _ = labels.NewRequirement(typeLabel, selection.Equals, sets.NewString(otype))
+		selector = typeLabel + "=" + otype + ","
 	}
-	ls = ls.Add(*ot)
 	if clustername == "" {
-		cname, _ = labels.NewRequirement(clusterLabel, selection.Exists, sets.String{})
+		selector +=  clusterLabel
 	} else {
-		cname, _ = labels.NewRequirement(clusterLabel, selection.Equals, sets.NewString(clustername))
+		selector += clusterLabel + "=" + clustername
 	}
-	ls = ls.Add(*cname)
-	return kapi.ListOptions{LabelSelector: ls}
+	sel, _ := labels.Parse(selector)
+	return metav1.ListOptions{LabelSelector: sel.String()}
 }
 
-func retrieveServiceURL(client kclient.ServiceInterface, stype, clustername string) string {
+func retrieveServiceURL(client *kubernetes.Clientset, stype, clustername, ns string) string {
 	selectorlist := makeSelector(stype, clustername)
-	srvs, err := client.List(selectorlist)
+	srvs, err := client.CoreV1().Services(ns).List(selectorlist)
 	if err == nil && len(srvs.Items) != 0 {
 		srv := srvs.Items[0]
 		scheme := "http://"
@@ -127,9 +145,10 @@ func retrieveServiceURL(client kclient.ServiceInterface, stype, clustername stri
 	return "<missing>"
 }
 
-func retrieveRouteForService(client oclient.RouteInterface, stype, clustername string) string {
+// TODO tmckay we need to pass in a config object here so we can get new openshift clients
+func retrieveRouteForService(client *routeclient.Clientset, stype, clustername, namespace string, ) string {
 	selectorlist := makeSelector(stype, clustername)
-	routes, err := client.List(selectorlist)
+	routes, err := client.RouteV1().Routes(namespace).List(selectorlist)
 	if err == nil && len(routes.Items) != 0 {
 		route := routes.Items[0]
 		return route.Spec.Host
@@ -137,9 +156,10 @@ func retrieveRouteForService(client oclient.RouteInterface, stype, clustername s
 	return "<no route>"
 }
 
-func checkForDeploymentConfigs(client oclient.DeploymentConfigInterface, clustername string) (bool, *deployapi.DeploymentConfig, error) {
+func checkForDeploymentConfigs(client *dclient.Clientset, clustername, namespace string) (bool, *ov1.DeploymentConfig, error) {
 	selectorlist := makeSelector(masterType, clustername)
-	dcs, err := client.List(selectorlist)
+	dc := client.AppsV1().DeploymentConfigs(namespace)
+	dcs, err := dc.List(selectorlist)
 	if err != nil {
 		return false, nil, err
 	}
@@ -148,7 +168,7 @@ func checkForDeploymentConfigs(client oclient.DeploymentConfigInterface, cluster
 	}
 	m := dcs.Items[0]
 	selectorlist = makeSelector(workerType, clustername)
-	dcs, err = client.List(selectorlist)
+	dcs, err = dc.List(selectorlist)
 	if err != nil {
 		return false, &m, err
 	}
@@ -286,8 +306,8 @@ func service(name string,
 		Label(typeLabel, otype).PodSelectors(podselectors).Ports(p), p
 }
 
-func checkForConfigMap(name string, cm kclient.ConfigMapsInterface) error {
-	_, err := cm.Get(name)
+func checkForConfigMap(cm corev1.ConfigMapInterface, name string) error {
+	_, err := cm.Get(name, metav1.GetOptions{})
 	if err != nil {
 		if strings.Index(err.Error(), "not found") != -1 {
 			return generalErr(err, fmt.Sprintf(missingConfigMsg, name), ClusterConfigCode)
@@ -297,32 +317,32 @@ func checkForConfigMap(name string, cm kclient.ConfigMapsInterface) error {
 	return nil
 }
 
-func countWorkers(client kclient.PodInterface, clustername string) (int, *kapi.PodList, error) {
+func countWorkers(client kubernetes.Clientset, clustername, namespace string) (int, *clv1.PodList, error) {
 	// If we are  unable to retrieve a list of worker pods, return -1 for count
 	// This is an error case, differnt from a list of length 0. Let the caller
 	// decide whether to report the error or the -1 count
 	cnt := -1
 	selectorlist := makeSelector(workerType, clustername)
-	pods, err := client.List(selectorlist)
+	pods, err := client.CoreV1().Pods(namespace).List(selectorlist)
 	if pods != nil {
 		cnt = len(pods.Items)
 	}
 	return cnt, pods, err
 }
 
-func getDriverDeployment(app, namespace string, client kclient.Interface) string {
+func getDriverDeployment(client *kubernetes.Clientset, app, namespace string) string {
 
 	// When we make calls from a driver pod, the most likely value we have is a deployment
 	// so use that first
-	rcc := client.ReplicationControllers(namespace)
-	rc, err := rcc.Get(app)
+	rcc := client.CoreV1().ReplicationControllers(namespace)
+	rc, err := rcc.Get(app, metav1.GetOptions{})
 	if err == nil && rc != nil {
 		return app
 	}
 
 	// Okay, it wasn't a deployment, maybe it's a pod
-	pc := client.Pods(namespace)
-	pod, err := pc.Get(app)
+	pc := client.CoreV1().Pods(namespace)
+	pod, err := pc.Get(app, metav1.GetOptions{})
 	if err == nil && pod != nil {
 		return pod.Labels["deployment"]
 	}
@@ -331,8 +351,9 @@ func getDriverDeployment(app, namespace string, client kclient.Interface) string
 
 // Create a cluster and return the representation
 func CreateCluster(
+	restconfig *rest.Config,
 	clustername, namespace, sparkimage string,
-	config *ClusterConfig, osclient *oclient.Client, client kclient.Interface, app string, ephemeral bool) (SparkCluster, error) {
+	config *ClusterConfig, app string, ephemeral bool) (SparkCluster, error) {
 
 	var driverrc string
 	var ephem_val string
@@ -349,9 +370,11 @@ func CreateCluster(
 
 	masterhost := clustername
 
+	k := getClientKeeper(restconfig)
+
 	// Check to see if a cluster already exists of the same name (complete or incomplete)
 	existing := SparkCluster{}
-	findClusterBody(clustername, namespace, osclient, client, &existing)
+	findClusterBody(clustername, namespace, k, &existing)
 	if !CheckNoCluster(&existing) {
 		var msg string
 		if existing.Status != "Running" {
@@ -362,9 +385,9 @@ func CreateCluster(
 		return result, generalErr(nil, msg, ComponentExistsCode)
 	}
 
-
 	// Copy any named config referenced and update it with any explicit config values
-	finalconfig, err := GetClusterConfig(config, client.ConfigMaps(namespace))
+	cm := getKubeClient(k).CoreV1().ConfigMaps(namespace)
+	finalconfig, err := GetClusterConfig(config, cm)
 	if err != nil {
 		return result, generalErr(err, clusterConfigMsg, ErrorCode(err))
 	}
@@ -383,9 +406,8 @@ func CreateCluster(
 	// configuration. If so they must exist. The ConfigMaps will be mounted
 	// as volumes on spark pods and the path stored in the environment
 	// variable UPDATE_SPARK_CONF_DIR
-	cm := client.ConfigMaps(namespace)
 	if finalconfig.SparkMasterConfig != "" {
-		err := checkForConfigMap(finalconfig.SparkMasterConfig, cm)
+		err := checkForConfigMap(cm, finalconfig.SparkMasterConfig)
 		if err != nil {
 			return result, err
 		}
@@ -393,7 +415,7 @@ func CreateCluster(
 	}
 
 	if finalconfig.SparkWorkerConfig != "" {
-		err := checkForConfigMap(finalconfig.SparkWorkerConfig, cm)
+		err := checkForConfigMap(cm, finalconfig.SparkWorkerConfig)
 		if err != nil {
 			return result, err
 		}
@@ -403,7 +425,7 @@ func CreateCluster(
 	// If an app value was passed find the deployment so we can do the cluster
 	// association and potentially mark the cluster as ephemeral
 	if app != "" {
-		driverrc = getDriverDeployment(app, namespace, client)
+		driverrc = getDriverDeployment(getKubeClient(k), app, namespace)
 	}
 	if ephemeral {
 		// If we can't find an rc then we just make a long-running cluster
@@ -435,7 +457,7 @@ func CreateCluster(
 	workerdc := sparkWorker(namespace, sparkimage, workercount, clustername, workerconfdir, finalconfig.SparkWorkerConfig, finalconfig.Metrics)
 
 	// Launch all of the objects
-	dcc := osclient.DeploymentConfigs(namespace)
+	dcc := getDcClient(k).AppsV1().DeploymentConfigs(namespace)
 	_, err = dcc.Create(&masterdc.DeploymentConfig)
 	if err != nil {
 		return result, generalErr(err, fmt.Sprintf(createDepConfigMsg, masterdc.Name), createCode(err))
@@ -443,15 +465,15 @@ func CreateCluster(
 	_, err = dcc.Create(&workerdc.DeploymentConfig)
 	if err != nil {
 		// Since we created the master deployment config, try to clean up
-		DeleteCluster(clustername, namespace, osclient, client, "", "")
+		DeleteCluster(clustername, namespace, restconfig, "", "")
 		return result, generalErr(err, fmt.Sprintf(createDepConfigMsg, workerdc.Name), createCode(err))
 	}
 
-	sc := client.Services(namespace)
+	sc := getKubeClient(k).CoreV1().Services(namespace)
 	_, err = sc.Create(&mastersv.Service)
 	if err != nil {
 		// Since we've created things, try to clean up
-		DeleteCluster(clustername, namespace, osclient, client, "", "")
+		DeleteCluster(clustername, namespace, restconfig, "", "")
 		return result, generalErr(err, masterSrvMsg, createCode(err))
 	}
 
@@ -459,7 +481,7 @@ func CreateCluster(
 	_, err = sc.Create(&websv.Service)
 	if err != nil {
 		// Since we've created things, try to clean up
-		DeleteCluster(clustername, namespace, osclient, client, "", "")
+		DeleteCluster(clustername, namespace, restconfig, "", "")
 		return result, generalErr(err, masterWebSrvMsg, createCode(err))
 	}
 
@@ -471,7 +493,7 @@ func CreateCluster(
 		_, err = sc.Create(&mastermtcs.Service)
 		if err != nil {
 			// Since we've created things, try to clean up
-			DeleteCluster(clustername, namespace, osclient, client, "", "")
+			DeleteCluster(clustername, namespace, restconfig, "", "")
 			return result, generalErr(err, masterMetricsSrvMsg, createCode(err))
 		}
 	}
@@ -480,23 +502,22 @@ func CreateCluster(
 	if finalconfig.ExposeWebUI != "" {
 		webui, _ := strconv.ParseBool(finalconfig.ExposeWebUI)
 		if webui {
-			rc := osclient.Routes(namespace)
+			rc := getRouteClient(k).RouteV1().Routes(namespace)
 			_, err = rc.Create(webuiroute)
 		}
 	}
 
 	// Wait for the replication controllers to exist before building the response.
-	rcc := client.ReplicationControllers(namespace)
 	{
-		var mrepl, wrepl *kapi.ReplicationController
+		var mrepl, wrepl *clv1.ReplicationController
 		mrepl = nil
 		wrepl = nil
 		for i := 0; i < 4; i++ {
 			if mrepl == nil {
-				mrepl, _ = getReplController(rcc, clustername, masterType)
+				mrepl, _ = getReplController(getKubeClient(k), clustername, namespace, masterType)
 			}
 			if wrepl == nil {
-				wrepl, _ = getReplController(rcc, clustername, workerType)
+				wrepl, _ = getReplController(getKubeClient(k), clustername, namespace, workerType)
 			}
 			if wrepl != nil && mrepl != nil {
 				break
@@ -508,9 +529,10 @@ func CreateCluster(
 	// Now that the creation actually worked, label the dc if the app value was passed.
 	// Note that updates can fail if someone updates the object underneath us, so
 	// we have to try again.  Try for 5 seconds
+	rcc := getKubeClient(k).CoreV1().ReplicationControllers(namespace)
 	if driverrc != "" {
 		for i := 0; i < 20; i++ {
-			driver, err := rcc.Get(driverrc)
+			driver, err := rcc.Get(driverrc, metav1.GetOptions{})
 			if err == nil {
 				if driver.Labels == nil {
 					driver.Labels = map[string]string{}
@@ -531,8 +553,8 @@ func CreateCluster(
 	result.Namespace = namespace
 	result.Href = "/clusters/" + clustername
 	result.Image = sparkimage
-	result.MasterURL = retrieveServiceURL(sc, masterType, clustername)
-	result.MasterWebURL = retrieveServiceURL(sc, webuiType, clustername)
+	result.MasterURL = retrieveServiceURL(getKubeClient(k), masterType, clustername, namespace)
+	result.MasterWebURL = retrieveServiceURL(getKubeClient(k), webuiType, clustername, namespace)
 	result.Status = "Running"
 	result.Config = finalconfig
 	result.MasterCount = 1
@@ -547,15 +569,15 @@ func CreateCluster(
 	return result, nil
 }
 
-func DeleteCluster(clustername, namespace string, osclient *oclient.Client, client kclient.Interface, app, appstatus string) (string, error) {
+func DeleteCluster(clustername, namespace string, restconfig *rest.Config, app, appstatus string) (string, error) {
 	var foundSomething bool = false
-	//var zero int32 = 0
 	info := []string{}
 	rcnames := []string{}
 
+	k := getClientKeeper(restconfig)
 
-	dcc := osclient.DeploymentConfigs(namespace)
-	rcc := client.ReplicationControllers(namespace)
+	dcc := getDcClient(k).AppsV1().DeploymentConfigs(namespace)
+	rcc := getKubeClient(k).CoreV1().ReplicationControllers(namespace)
 
 	// If we have supplied an appstatus flag, then we only delete the cluster if it is marked as ephemeral
 	// If it's not marked as ephemeral then we skip the delete
@@ -563,24 +585,24 @@ func DeleteCluster(clustername, namespace string, osclient *oclient.Client, clie
 		var delete bool = false
 
 		// See if the master dc has the ephemeral label
-		master, err := dcc.Get(mastername(clustername))
+		master, err := dcc.Get(mastername(clustername), metav1.GetOptions{})
 		if err != nil {
 			// We can't get the dc for the master to look up whether it's ephemeral.
 			// But this means the cluster is partially broken anyway. Let the normal delete
 			// fall through and cleanup
 			delete = true
 		} else if ephemeral, ok := master.Labels[ephemeralLabel]; ok {
-			deployment := getDriverDeployment(app, namespace, client)
+			deployment := getDriverDeployment(getKubeClient(k), app, namespace)
 			if deployment != ephemeral {
 				info = append(info, "cluster is not linked to app")
 			} else {
 				// If the driver has been scaled to zero, or if the application
 				// completed and the repl count is 1 then delete (because in the
 				// completed case the driver is the only instance)
-				repl, err := rcc.Get(deployment)
+				repl, err := rcc.Get(deployment, metav1.GetOptions{})
 				delete = err != nil ||
-					repl.Spec.Replicas == 0 ||
-					(appstatus == "completed" && repl.Spec.Replicas == 1)
+					(repl.Spec.Replicas != nil && *repl.Spec.Replicas == 0) ||
+					(appstatus == "completed" && (repl.Spec.Replicas == nil || *repl.Spec.Replicas == 1))
 				if !delete {
 					info = append(info, "driver replica count > 0 (or > 1 for completed app)")
 				}
@@ -600,7 +622,7 @@ func DeleteCluster(clustername, namespace string, osclient *oclient.Client, clie
 	// Delete the dcs
 	deployments, err := dcc.List(selectorlist)
 	for i := range deployments.Items {
-		err = dcc.Delete(deployments.Items[i].Name)
+		err = dcc.Delete(deployments.Items[i].Name, nil)
 		if err != nil {
 			info = append(info, "unable to delete deployment config "+deployments.Items[i].Name+" ("+err.Error()+")")
 		} else {
@@ -609,7 +631,7 @@ func DeleteCluster(clustername, namespace string, osclient *oclient.Client, clie
 	}
 
 	// Delete the rcs
-	rcc = client.ReplicationControllers(namespace)
+	rcc = getKubeClient(k).CoreV1().ReplicationControllers(namespace)
 	repls, err := rcc.List(selectorlist)
 	for i := range repls.Items {
 		rcnames = append(rcnames, repls.Items[i].Name)
@@ -621,12 +643,10 @@ func DeleteCluster(clustername, namespace string, osclient *oclient.Client, clie
 		}
 	}
 
-	pc := client.Pods(namespace)
+	pc := getKubeClient(k).CoreV1().Pods(namespace)
 	for i := range rcnames {
-		ls := labels.NewSelector()
-		plist, _ := labels.NewRequirement("openshift.io/deployer-pod-for.name", selection.Equals, sets.NewString(rcnames[i]))
-		ls = ls.Add(*plist)
-		pods, err := pc.List(kapi.ListOptions{LabelSelector: ls})
+		sel, _ := labels.Parse("openshift.io/deployer-pod-for.name=" + rcnames[i])
+		pods, err := pc.List(metav1.ListOptions{LabelSelector: sel.String()})
 		if err == nil && len(pods.Items) != 0 {
 			for p := range pods.Items {
 				err = pc.Delete(pods.Items[p].Name, nil)
@@ -650,18 +670,18 @@ func DeleteCluster(clustername, namespace string, osclient *oclient.Client, clie
 		}
 	}
 
-	rc := osclient.Routes(namespace)
+	rc := getRouteClient(k).RouteV1().Routes(namespace)
 	webUIRouteName := clustername + "-ui-route"
-	err = rc.Delete(webUIRouteName)
+	err = rc.Delete(webUIRouteName, nil)
 	if err != nil {
 		info = append(info, "unable to delete route " + webUIRouteName + " (" + err.Error() + ")")
 	}
 
 	// Delete the services
-	sc := client.Services(namespace)
+	sc := getKubeClient(k).CoreV1().Services(namespace)
 	srvs, err := sc.List(selectorlist)
 	for i := range srvs.Items {
-		err = sc.Delete(srvs.Items[i].Name)
+		err = sc.Delete(srvs.Items[i].Name, nil)
 		if err != nil {
 			info = append(info, "unable to delete service " + srvs.Items[i].Name + " (" + err.Error() + ")")
 		} else {
@@ -677,10 +697,9 @@ func DeleteCluster(clustername, namespace string, osclient *oclient.Client, clie
 	return strings.Join(info, ", "), nil
 }
 
-func findClusterBody(clustername, namespace string, osclient *oclient.Client, client kclient.Interface, result *SparkCluster) {
+func findClusterBody(clustername, namespace string, k ClientKeeper, result *SparkCluster) {
 
-	sc := client.Services(namespace)
-	dc := osclient.DeploymentConfigs(namespace)
+	dc := getDcClient(k).AppsV1().DeploymentConfigs(namespace)
 
 	result.Name = clustername
 	result.Namespace = namespace
@@ -691,7 +710,7 @@ func findClusterBody(clustername, namespace string, osclient *oclient.Client, cl
 
 	// Note, we do not report an error here since we are
 	// reporting on multiple clusters. Instead cnt will be 0.
-	worker, err := dc.Get(workername(clustername))
+	worker, err := dc.Get(workername(clustername), metav1.GetOptions{})
 	if err == nil {
 		result.WorkerCount = int(worker.Status.Replicas)
 	} else {
@@ -700,18 +719,18 @@ func findClusterBody(clustername, namespace string, osclient *oclient.Client, cl
 	}
 
 	// TODO we only want to count running pods (not terminating)
-	result.MasterURL = retrieveServiceURL(sc, masterType, clustername)
+	result.MasterURL = retrieveServiceURL(getKubeClient(k), masterType, clustername, namespace)
 	if result.MasterURL == "<missing>" {
 		result.Status = "Incomplete"
 	}
-	result.MasterWebURL = retrieveServiceURL(sc, webuiType, clustername)
+	result.MasterWebURL = retrieveServiceURL(getKubeClient(k), webuiType, clustername, namespace)
 	if result.MasterWebURL == "<missing>" {
 		result.Status = "Incomplete"
 	}
-	result.MasterWebRoute = retrieveRouteForService(osclient.Routes(namespace), webuiType, clustername)
+	result.MasterWebRoute = retrieveRouteForService(getRouteClient(k), webuiType, clustername, namespace)
 
 	result.Ephemeral = "<shared>"
-	master, err := dc.Get(mastername(clustername))
+	master, err := dc.Get(mastername(clustername), metav1.GetOptions{})
 	if err == nil {
 		result.MasterCount = int(master.Status.Replicas)
 		if ephemeral, ok := master.Labels[ephemeralLabel]; ok {
@@ -738,9 +757,11 @@ func CheckNoCluster(cluster *SparkCluster) bool {
 }
 
 // Find a cluster and return its representation
-func FindSingleCluster(name, namespace string, osclient *oclient.Client, client kclient.Interface) (SparkCluster, error) {
+func FindSingleCluster(name, namespace string, restconfig *rest.Config) (SparkCluster, error) {
 
-	addpod := func(p kapi.Pod) SparkPod {
+	k := getClientKeeper(restconfig)
+
+	addpod := func(p clv1.Pod) SparkPod {
 		return SparkPod{
 			IP:     p.Status.PodIP,
 			Status: string(p.Status.Phase),
@@ -748,9 +769,9 @@ func FindSingleCluster(name, namespace string, osclient *oclient.Client, client 
 		}
 	}
         var result SparkCluster
-	findClusterBody(name, namespace, osclient, client, &result)
+	findClusterBody(name, namespace, k, &result)
 
-	pc := client.Pods(namespace)
+	pc := getKubeClient(k).CoreV1().Pods(namespace)
 	pods, err := pc.List(makeSelector("", name))
 	if err != nil {
 		return result, generalErr(err, podListMsg, ClientOperationCode)
@@ -768,21 +789,23 @@ func FindSingleCluster(name, namespace string, osclient *oclient.Client, client 
 }
 
 // Find all clusters and return their representation
-func FindClusters(namespace string, osclient *oclient.Client, client kclient.Interface, app string) ([]SparkCluster, error) {
+func FindClusters(namespace string, restconfig *rest.Config, app string) ([]SparkCluster, error) {
 
-	dcc := osclient.DeploymentConfigs(namespace)
-	rc := client.ReplicationControllers(namespace)
+	k := getClientKeeper(restconfig)
+
+	dcc := getDcClient(k).AppsV1().DeploymentConfigs(namespace)
+	rc := getKubeClient(k).CoreV1().ReplicationControllers(namespace)
 
 	// If app is not null, look for a driver label.
 	// If we find it get the name of the cluster and call FindSingleCluster.
 	if app != "" {
-		deployment := getDriverDeployment(app, namespace, client)
+		deployment := getDriverDeployment(getKubeClient(k), app, namespace)
 		if deployment != "" {
-			driver, err := rc.Get(deployment)
+			driver, err := rc.Get(deployment, metav1.GetOptions{})
 			if err == nil && driver != nil {
 				if clustername, ok := driver.Labels[driverLabel]; ok {
 					result := make([]SparkCluster, 1, 1)
-					result[0], err = FindSingleCluster(clustername, namespace, osclient, client)
+					result[0], err = FindSingleCluster(clustername, namespace, restconfig)
 					return result, err
 				}
 			}
@@ -811,14 +834,14 @@ func FindClusters(namespace string, osclient *oclient.Client, client kclient.Int
 	}
 	result := make([]SparkCluster, len(clist), len(clist))
 	idx := 0
-	for k, _ := range clist {
-		findClusterBody(k, namespace, osclient, client, &result[idx])
+	for cl, _ := range clist {
+		findClusterBody(cl, namespace, k, &result[idx])
 		idx++
 	}
 	return result, nil
 }
 
-func newestRepl(list *kapi.ReplicationControllerList ) *kapi.ReplicationController {
+func newestRepl(list *clv1.ReplicationControllerList ) *clv1.ReplicationController {
 	newestRepl := list.Items[0]
 	for i := 0; i < len(list.Items); i++ {
 		if list.Items[i].CreationTimestamp.Unix() > newestRepl.CreationTimestamp.Unix() {
@@ -828,10 +851,10 @@ func newestRepl(list *kapi.ReplicationControllerList ) *kapi.ReplicationControll
 	return &newestRepl
 }
 
-func getReplController(client kclient.ReplicationControllerInterface, clustername, otype string) (*kapi.ReplicationController, error) {
+func getReplController(client *kubernetes.Clientset, clustername, namespace, otype string) (*clv1.ReplicationController, error) {
 
 	selectorlist := makeSelector(otype, clustername)
-	repls, err := client.List(selectorlist)
+	repls, err := client.CoreV1().ReplicationControllers(namespace).List(selectorlist)
 	if err != nil || len(repls.Items) == 0 {
 		return nil, err
 	}
@@ -840,26 +863,27 @@ func getReplController(client kclient.ReplicationControllerInterface, clusternam
 	return newestRepl(repls), nil
 }
 
-func getDepConfig(client oclient.DeploymentConfigInterface, clustername, otype string) (*deployapi.DeploymentConfig, error) {
-	var dep *deployapi.DeploymentConfig
+func getDepConfig(client *dclient.Clientset, clustername, namespace, otype string) (*ov1.DeploymentConfig, error) {
+	var dep *ov1.DeploymentConfig
 	var err error
 	if otype == masterType {
-		dep, err = client.Get(mastername(clustername))
+		dep, err = client.AppsV1().DeploymentConfigs(namespace).Get(mastername(clustername), metav1.GetOptions{})
 	} else {
-		dep, err = client.Get(workername(clustername))
+		dep, err = client.AppsV1().DeploymentConfigs(namespace).Get(workername(clustername), metav1.GetOptions{})
 	}
 	return dep, err
 }
 
-func scaleDep(dcc oclient.DeploymentConfigInterface, clustername string, count int, otype string) (bool, error) {
+func scaleDep(client *dclient.Clientset, clustername, namespace string, count int, otype string) (bool, error) {
 	var err error
 	var updated bool = false
 	if count <= SentinelCountValue {
 		return updated, nil
 	}
 
+	dcc := client.AppsV1().DeploymentConfigs(namespace)
 	for i := 0; i < 20; i++ {
-		dep, err := getDepConfig(dcc, clustername, otype)
+		dep, err := getDepConfig(client, clustername, namespace, otype)
 		if err != nil {
 			return updated, generalErr(err, fmt.Sprintf(depMsg, otype), ClientOperationCode)
 		} else if dep == nil {
@@ -886,10 +910,12 @@ func scaleDep(dcc oclient.DeploymentConfigInterface, clustername string, count i
 	return updated, nil
 }
 
-func updateAnnotation(dcc oclient.DeploymentConfigInterface, clustername string, wup bool, mup bool, workers int, masters int) error {
+func updateAnnotation(client *dclient.Clientset, clustername, namespace string, wup bool, mup bool, workers int, masters int) error {
 	var updateerr error
+
+	dcc := client.AppsV1().DeploymentConfigs(namespace)
 	for i := 0; i < 20; i++ {
-		master, err := dcc.Get(mastername(clustername))
+		master, err := dcc.Get(mastername(clustername), metav1.GetOptions{})
 		if err == nil {
 			// Annotations have to be filled in because we did it on create
 			// but check anyway
@@ -931,16 +957,18 @@ func updateAnnotation(dcc oclient.DeploymentConfigInterface, clustername string,
 // Update a cluster and return the new representation
 // This routine supports the same stored config semantics as used in cluster creation
 // but at this point only allows updating the master and worker counts.
-func UpdateCluster(name, namespace string, config *ClusterConfig, osclient *oclient.Client, client kclient.Interface) (SparkCluster, error) {
+func UpdateCluster(name, namespace string, config *ClusterConfig, restconfig *rest.Config) (SparkCluster, error) {
 
 	var result SparkCluster = SparkCluster{}
 	clustername := name
+
+	k := getClientKeeper(restconfig)
 
 	// Before we do further checks, make sure that we have deploymentconfigs
 	// If either the master or the worker deploymentconfig are missing, we
 	// assume that the cluster is missing. These are the base objects that
 	// we use to create a cluster
-	ok, _, err := checkForDeploymentConfigs(osclient.DeploymentConfigs(namespace), clustername)
+	ok, _, err := checkForDeploymentConfigs(getDcClient(k), clustername, namespace)
 	if err != nil {
 		return result, generalErr(err, findDepConfigMsg, ClientOperationCode)
 	}
@@ -949,7 +977,7 @@ func UpdateCluster(name, namespace string, config *ClusterConfig, osclient *ocli
 	}
 
 	// Copy any named config referenced and update it with any explicit config values
-	finalconfig, err := GetClusterConfig(config, client.ConfigMaps(namespace))
+	finalconfig, err := GetClusterConfig(config, getKubeClient(k).CoreV1().ConfigMaps(namespace))
 	if err != nil {
 		return result, generalErr(err, clusterConfigMsg, ErrorCode(err))
 	}
@@ -960,35 +988,36 @@ func UpdateCluster(name, namespace string, config *ClusterConfig, osclient *ocli
 	// that should be an error at this point (unless we spin all the pods down and
 	// redeploy)
 
-	dcc := osclient.DeploymentConfigs(namespace)
-	wup, err := scaleDep(dcc, clustername, workercount, workerType)
+	wup, err := scaleDep(getDcClient(k), clustername, namespace, workercount, workerType)
 	if err != nil {
 		return result, err
 	}
-	mup, merr := scaleDep(dcc, clustername, mastercount, masterType)
-	err = updateAnnotation(dcc, clustername, wup, mup, workercount, mastercount)
+	mup, merr := scaleDep(getDcClient(k), clustername, namespace, mastercount, masterType)
+	err = updateAnnotation(getDcClient(k), clustername, namespace, wup, mup, workercount, mastercount)
 	if merr != nil {
 		return result, merr
 	}
 	if err != nil {
 		return result, err
 	}
-	findClusterBody(name, namespace, osclient, client, &result)
+	findClusterBody(name, namespace, k, &result)
 	return result, nil
 }
 
 // Scale a cluster
 // This routine supports a specific scale operation based on immediate values for
 // master and worker counts and does not consider stored configs.
-func ScaleCluster(name, namespace string, masters, workers int, osclient *oclient.Client, client kclient.Interface) error {
+func ScaleCluster(name, namespace string, masters, workers int, restconfig *rest.Config) error {
 
 	clustername := name
+
+	k := getClientKeeper(restconfig)
 
 	// Before we do further checks, make sure that we have deploymentconfigs
 	// If either the master or the worker deploymentconfig are missing, we
 	// assume that the cluster is missing. These are the base objects that
 	// we use to create a cluster
-	ok, _, err := checkForDeploymentConfigs(osclient.DeploymentConfigs(namespace), clustername)
+	ok, _, err := checkForDeploymentConfigs(getDcClient(k), clustername, namespace)
 	if err != nil {
 		return generalErr(err, findDepConfigMsg, ClientOperationCode)
 	}
@@ -1001,16 +1030,15 @@ func ScaleCluster(name, namespace string, masters, workers int, osclient *oclien
 		return NewClusterError(MasterCountMustBeZeroOrOne, ClusterConfigCode)
 	}
 
-	dcc := osclient.DeploymentConfigs(namespace)
-	wup, werr := scaleDep(dcc, clustername, workers, workerType)
+	wup, werr := scaleDep(getDcClient(k), clustername, namespace, workers, workerType)
 	if werr != nil {
 		return werr
 	}
 
 	// We've already updated workers, so if there is an error
 	// updating master we have to modify the config anyway
-	mup, merr := scaleDep(dcc, clustername, masters, masterType)
-	err = updateAnnotation(dcc, clustername, wup, mup, workers, masters)
+	mup, merr := scaleDep(getDcClient(k), clustername, namespace, masters, masterType)
+	err = updateAnnotation(getDcClient(k), clustername, namespace, wup, mup, workers, masters)
 	if merr != nil {
 		return merr
 	}

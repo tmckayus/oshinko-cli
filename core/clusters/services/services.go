@@ -1,8 +1,8 @@
 package services
 
 import (
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util/intstr"
+	"k8s.io/client-go/pkg/api/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 /*
@@ -32,7 +32,7 @@ import (
 */
 
 type OService struct {
-	kapi.Service
+	v1.Service
 }
 
 func Service(name string) *OService {
@@ -40,8 +40,8 @@ func Service(name string) *OService {
 	s.Kind = "Service"
 	s.APIVersion = "v1"
 	s.Name = name
-	s.Spec.Type = kapi.ServiceTypeClusterIP
-	s.Spec.SessionAffinity = kapi.ServiceAffinityNone
+	s.Spec.Type = v1.ServiceTypeClusterIP
+	s.Spec.SessionAffinity = v1.ServiceAffinityNone
 	s.Spec.Selector = map[string]string{}
 	return &s
 }
@@ -70,7 +70,7 @@ func (s *OService) PodSelectors(selectors map[string]string) *OService {
 }
 
 func (s *OService) Ports(ports ...*OServicePort) *OService {
-	kports := make([]kapi.ServicePort, len(ports))
+	kports := make([]v1.ServicePort, len(ports))
 	for idx, p := range ports {
 		kports[idx] = p.ServicePort
 	}
@@ -79,12 +79,12 @@ func (s *OService) Ports(ports ...*OServicePort) *OService {
 }
 
 type OServicePort struct {
-	kapi.ServicePort
+	v1.ServicePort
 }
 
 func ServicePort(port int) *OServicePort {
 	s := OServicePort{}
-	s.ServicePort.Protocol = kapi.ProtocolTCP
+	s.ServicePort.Protocol = v1.ProtocolTCP
 	s.ServicePort.Port = int32(port)
 	return &s
 }
@@ -94,7 +94,7 @@ func (s *OServicePort) Name(name string) *OServicePort {
 	return s
 }
 
-func (s *OServicePort) Protocol(proto kapi.Protocol) *OServicePort {
+func (s *OServicePort) Protocol(proto v1.Protocol) *OServicePort {
 	s.ServicePort.Protocol = proto
 	return s
 }

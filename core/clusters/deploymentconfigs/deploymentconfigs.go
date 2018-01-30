@@ -1,13 +1,13 @@
 package deploymentconfigs
 
 import (
-	"github.com/openshift/origin/pkg/deploy/api"
+	ov1 "github.com/openshift/origin/pkg/apps/apis/apps/v1"
 	"github.com/radanalyticsio/oshinko-cli/core/clusters/podtemplates"
-	kapi "k8s.io/kubernetes/pkg/api"
+	kapi "k8s.io/kubernetes/pkg/api/v1"
 )
 
 type ODeploymentConfig struct {
-	api.DeploymentConfig
+	ov1.DeploymentConfig
 }
 
 func DeploymentConfig(name, namespace string) *ODeploymentConfig {
@@ -63,15 +63,15 @@ func (dc *ODeploymentConfig) GetPodSelectors() map[string]string {
 }
 
 func (dc *ODeploymentConfig) RollingStrategy() *ODeploymentConfig {
-	dc.Spec.Strategy = api.DeploymentStrategy{Type: api.DeploymentStrategyTypeRolling}
+	dc.Spec.Strategy = ov1.DeploymentStrategy{Type: ov1.DeploymentStrategyTypeRolling}
 	return dc
 }
 
-func (dc *ODeploymentConfig) RollingStrategyParams(rp *api.RollingDeploymentStrategyParams,
+func (dc *ODeploymentConfig) RollingStrategyParams(rp *ov1.RollingDeploymentStrategyParams,
 	req kapi.ResourceRequirements,
 	lbls, anttns map[string]string) *ODeploymentConfig {
-	dc.Spec.Strategy = api.DeploymentStrategy{
-		Type:          api.DeploymentStrategyTypeRolling,
+	dc.Spec.Strategy = ov1.DeploymentStrategy{
+		Type:          ov1.DeploymentStrategyTypeRolling,
 		RollingParams: rp,
 		Resources:     req,
 		Labels:        lbls,
@@ -81,15 +81,15 @@ func (dc *ODeploymentConfig) RollingStrategyParams(rp *api.RollingDeploymentStra
 }
 
 func (dc *ODeploymentConfig) RecreateStrategy() *ODeploymentConfig {
-	dc.Spec.Strategy = api.DeploymentStrategy{Type: api.DeploymentStrategyTypeRecreate}
+	dc.Spec.Strategy = ov1.DeploymentStrategy{Type: ov1.DeploymentStrategyTypeRecreate}
 	return dc
 }
 
-func (dc *ODeploymentConfig) RecreateStrategyParams(rp *api.RecreateDeploymentStrategyParams,
+func (dc *ODeploymentConfig) RecreateStrategyParams(rp *ov1.RecreateDeploymentStrategyParams,
 	req kapi.ResourceRequirements,
 	lbls, anttns map[string]string) *ODeploymentConfig {
-	dc.Spec.Strategy = api.DeploymentStrategy{
-		Type:           api.DeploymentStrategyTypeRecreate,
+	dc.Spec.Strategy = ov1.DeploymentStrategy{
+		Type:           ov1.DeploymentStrategyTypeRecreate,
 		RecreateParams: rp,
 		Resources:      req,
 		Labels:         lbls,
@@ -98,11 +98,11 @@ func (dc *ODeploymentConfig) RecreateStrategyParams(rp *api.RecreateDeploymentSt
 	return dc
 }
 
-func (dc *ODeploymentConfig) CustomStrategyParams(cp *api.CustomDeploymentStrategyParams,
+func (dc *ODeploymentConfig) CustomStrategyParams(cp *ov1.CustomDeploymentStrategyParams,
 	req kapi.ResourceRequirements,
 	lbls, anttns map[string]string) *ODeploymentConfig {
-	dc.Spec.Strategy = api.DeploymentStrategy{
-		Type:         api.DeploymentStrategyTypeCustom,
+	dc.Spec.Strategy = ov1.DeploymentStrategy{
+		Type:         ov1.DeploymentStrategyTypeCustom,
 		CustomParams: cp,
 		Resources:    req,
 		Labels:       lbls,
@@ -113,19 +113,19 @@ func (dc *ODeploymentConfig) CustomStrategyParams(cp *api.CustomDeploymentStrate
 
 func (dc *ODeploymentConfig) TriggerOnConfigChange() *ODeploymentConfig {
 	for _, val := range dc.Spec.Triggers {
-		if val.Type == api.DeploymentTriggerOnConfigChange {
+		if val.Type == ov1.DeploymentTriggerOnConfigChange {
 			return dc
 		}
 	}
 	dc.Spec.Triggers = append(
 		dc.Spec.Triggers,
-		api.DeploymentTriggerPolicy{Type: api.DeploymentTriggerOnConfigChange})
+		ov1.DeploymentTriggerPolicy{Type: ov1.DeploymentTriggerOnConfigChange})
 	return dc
 }
 
-func (dc *ODeploymentConfig) TriggerOnImageChange(ic *api.DeploymentTriggerImageChangeParams) *ODeploymentConfig {
+func (dc *ODeploymentConfig) TriggerOnImageChange(ic *ov1.DeploymentTriggerImageChangeParams) *ODeploymentConfig {
 	for idx, val := range dc.Spec.Triggers {
-		if val.Type == api.DeploymentTriggerOnImageChange {
+		if val.Type == ov1.DeploymentTriggerOnImageChange {
 			// If we pass the same pointer, ignore
 			if val.ImageChangeParams == ic {
 				return dc
@@ -141,7 +141,7 @@ func (dc *ODeploymentConfig) TriggerOnImageChange(ic *api.DeploymentTriggerImage
 	}
 	dc.Spec.Triggers = append(
 		dc.Spec.Triggers,
-		api.DeploymentTriggerPolicy{Type: api.DeploymentTriggerOnImageChange,
+		ov1.DeploymentTriggerPolicy{Type: ov1.DeploymentTriggerOnImageChange,
 			ImageChangeParams: ic})
 	return dc
 }
